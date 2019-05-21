@@ -21,7 +21,7 @@ use std::process;
 use docopt::Docopt;
 use prettytable::Table;
 use prettytable::format;
-use xml::writer::{EmitterConfig, XmlEvent, Result as XmlResult};
+use xml::writer::{EmitterConfig, EventWriter, XmlEvent, Result as XmlResult};
 
 use benchmark::{Benchmarks, Benchmark, FailedMsgBuilder};
 use error::{Result, Error};
@@ -351,24 +351,24 @@ fn open_file<P: AsRef<Path>>(path: P) -> Result<File> {
 }
 
 /// Create junit-format xml file with given path when junit flag on.
-fn create_junit<P>(path: P, benches: benchmark::PairedBenchmarks) -> XmlResult<()>
-    where P: AsRef<Path>
-{
+fn create_junit<P: AsRef<Path>>(path: P, benches: benchmark::PairedBenchmarks) -> XmlResult<()> {
     let cmps = benches.comparisons();
 
     // An iter of all failed test cases in the new set.
-    let failures_iter = {
-        let a = benches.failures().iter();
-        let b = benches.missing_new().iter().filter(|b|b.failed_msg.is_some());
-        a.chain(b)
-    };
+    let failures_new = failures_new_iter(&benches);
+    // let failures_iter = {
+    //     let a = benches.failures().iter();
+    //     let b = benches.missing_new().iter().filter(|b|b.failed_msg.is_some());
+    //     a.chain(b)
+    // };
 
     // An iter of all benchmarked test cases in the new set.
-    let new_benchmarks_iter = {
-        let a = benches.new_benchmarks().iter();
-        let b = benches.missing_new().iter().filter(|b|b.failed_msg.is_none());
-        a.chain(b)
-    };
+    let benchmarks_new = benchmarks_new_iter(&benches);
+    // let new_benchmarks_iter = {
+    //     let a = benches.new_benchmarks().iter();
+    //     let b = benches.missing_new().iter().filter(|b|b.failed_msg.is_none());
+    //     a.chain(b)
+    // };
 
     let file = File::create(path)?;
     let mut ew = EmitterConfig::new()
@@ -379,7 +379,7 @@ fn create_junit<P>(path: P, benches: benchmark::PairedBenchmarks) -> XmlResult<(
     let testsuite_name = "benchcmp";
     // There is no error factor currently used.
     let errors = 0;
-    let failures = failures_iter.clone().count();
+    let failures = failures_new.clone().count();
     let tests = cmps.len() + errors + failures;
     let time = &{
         let sum = cmps.iter().fold(0, |t, cmp|t + cmp.new.ns);
@@ -387,53 +387,123 @@ fn create_junit<P>(path: P, benches: benchmark::PairedBenchmarks) -> XmlResult<(
     };
 
     // Add elements of xml.
-    ew.write(
-        XmlEvent::start_element("testsuite")
-            .attr("name", testsuite_name)
-            .attr("tests", &tests.to_string())
-            .attr("errors", &errors.to_string())
-            .attr("failures", &failures.to_string())
-            .attr("time", time)
-    )?;
+    let mut events = vec![];
+
+    events.push(XmlEvent::start_element("testsuite")
+        .attr("name", testsuite_name)
+        .attr("tests", &tests.to_string())
+        .attr("errors", &errors.to_string())
+        .attr("failures", &failures.to_string())
+        .attr("time", time)
+    );
     for cmp in cmps.iter() {
         let time = &format!("{:.9}", cmp.new.ns as f64 * 0.000_000_001);
-        ew.write(
-            XmlEvent::start_element("testcase")
-                .attr("classname", testsuite_name)
-                .attr("name", &cmp.new.name)
-                .attr("time", time)
-        )?;
-        ew.write(XmlEvent::end_element())?;
+        events.push(XmlEvent::start_element("testcase")
+            .attr("classname", testsuite_name)
+            .attr("name", &cmp.new.name)
+            .attr("time", time)
+        );
+        events.push(XmlEvent::end_element());
     }
-    for new in new_benchmarks_iter {
+    for new in benchmarks_new {
         let time = &format!("{:.9}", new.ns as f64 * 0.000_000_001);
-        ew.write(
-            XmlEvent::start_element("testcase")
-                .attr("classname", testsuite_name)
-                .attr("name", &new.name)
-                .attr("time", time)
-        )?;
-        ew.write(XmlEvent::end_element())?;
+        events.push(XmlEvent::start_element("testcase")
+            .attr("classname", testsuite_name)
+            .attr("name", &new.name)
+            .attr("time", time)
+        );
+        events.push(XmlEvent::end_element());
     }
-    for f in failures_iter {
-        ew.write(
-            XmlEvent::start_element("testcase")
-                .attr("classname", testsuite_name)
-                .attr("name", &f.name)
-                .attr("time", "0")
-        )?;
+    for f in failures_new {
+        events.push(XmlEvent::start_element("testcase")
+            .attr("classname", testsuite_name)
+            .attr("name", &f.name)
+            .attr("time", "0")
+        );
             let msg = f.failed_msg.as_ref().unwrap();
-            ew.write(
-                XmlEvent::start_element("failure")
-                    .attr("type", "FAILED")
-                    .attr("message", "")
-            )?;
-            ew.write(msg.msg.as_str())?;
-            ew.write(XmlEvent::end_element())?;
-        ew.write(XmlEvent::end_element())?;
+            events.push(XmlEvent::start_element("failure")
+                .attr("type", "FAILED")
+                .attr("message", "")
+            );
+            events.push(msg.msg.as_str());
+            events.push(XmlEvent::end_element());
+        events.push(XmlEvent::end_element());
     }
-    ew.write(XmlEvent::end_element())?;
+    events.push(XmlEvent::end_element());
+    ew_write_all(&mut ew, events)?;
+    // ew.write(
+    //     XmlEvent::start_element("testsuite")
+    //         .attr("name", testsuite_name)
+    //         .attr("tests", &tests.to_string())
+    //         .attr("errors", &errors.to_string())
+    //         .attr("failures", &failures.to_string())
+    //         .attr("time", time)
+    // )?;
+    // for cmp in cmps.iter() {
+    //     let time = &format!("{:.9}", cmp.new.ns as f64 * 0.000_000_001);
+    //     ew.write(
+    //         XmlEvent::start_element("testcase")
+    //             .attr("classname", testsuite_name)
+    //             .attr("name", &cmp.new.name)
+    //             .attr("time", time)
+    //     )?;
+    //     ew.write(XmlEvent::end_element())?;
+    // }
+    // for new in benchmarks_new {
+    //     let time = &format!("{:.9}", new.ns as f64 * 0.000_000_001);
+    //     ew.write(
+    //         XmlEvent::start_element("testcase")
+    //             .attr("classname", testsuite_name)
+    //             .attr("name", &new.name)
+    //             .attr("time", time)
+    //     )?;
+    //     ew.write(XmlEvent::end_element())?;
+    // }
+    // for f in failures_new {
+    //     ew.write(
+    //         XmlEvent::start_element("testcase")
+    //             .attr("classname", testsuite_name)
+    //             .attr("name", &f.name)
+    //             .attr("time", "0")
+    //     )?;
+    //         let msg = f.failed_msg.as_ref().unwrap();
+    //         ew.write(
+    //             XmlEvent::start_element("failure")
+    //                 .attr("type", "FAILED")
+    //                 .attr("message", "")
+    //         )?;
+    //         ew.write(msg.msg.as_str())?;
+    //         ew.write(XmlEvent::end_element())?;
+    //     ew.write(XmlEvent::end_element())?;
+    // }
+    // ew.write(XmlEvent::end_element())?;
 
+    Ok(())
+}
+
+fn failures_new_iter<'a>(benches: &'a benchmark::PairedBenchmarks)
+ -> impl 'a + Iterator<Item=&Benchmark> + Clone {
+    let a = benches.failures().iter();
+    let b = benches.missing_new().iter().filter(|b|b.failed_msg.is_some());
+    a.chain(b)
+}
+
+fn benchmarks_new_iter<'a>(benches: &'a benchmark::PairedBenchmarks)
+ -> impl 'a + Iterator<Item=&Benchmark> + Clone {
+    let a = benches.new_benchmarks().iter();
+    let b = benches.missing_new().iter().filter(|b|b.failed_msg.is_none());
+    a.chain(b)
+}
+
+fn ew_write(ew: &mut EventWriter, e: impl Into<XmlEvent>) -> XmlResult<()> {
+    ew.write(e)?;
+    Ok(())
+}
+
+fn ew_write_all(ew: &mut EventWriter, events: Vec<impl Into<XmlEvent>>) -> XmlResult<()> {
+    for e in events {
+        ew.write(e)?;
+    }
     Ok(())
 }
 
@@ -669,5 +739,9 @@ mod tests {
                 benches.into_iter().all(|b| !(b.name.starts_with(&old) || b.name.starts_with(&new)))
             }
         }
+    }
+
+    mod create_junit {
+
     }
 }

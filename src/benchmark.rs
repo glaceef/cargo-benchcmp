@@ -227,10 +227,10 @@ pub struct FailedMsgBuilder {
 impl FailedMsgBuilder {
     pub fn build(self, line: &str) -> Result<FailedMsg, ()> {
         match BENCHMARK_REGEX_FAILED_MESSAGE2.find(line) {
-            Some(caps) => {
+            Some(cap) => {
                 Ok(FailedMsg{
                     name: self.name,
-                    msg: caps.as_str().to_string(),
+                    msg: cap.as_str().to_string(),
                 })
             }
             None => Err(())
@@ -242,8 +242,8 @@ impl FromStr for FailedMsgBuilder {
     type Err = ();
 
     fn from_str(line: &str) -> Result<FailedMsgBuilder, ()> {
-        match BENCHMARK_REGEX_FAILED_MESSAGE1.captures(line) {
-            Some(caps) => Ok(FailedMsgBuilder{ name: caps["name"].to_string() }),
+        match BENCHMARK_REGEX_FAILED_MESSAGE1.find(line) {
+            Some(cap) => Ok(FailedMsgBuilder{ name: cap.as_str().to_string() }),
             None => Err(())
         }
     }
@@ -531,6 +531,40 @@ mod tests {
                 } else {
                     false
                 }
+            }
+        }
+    }
+
+    mod failed_message {
+        use super::super::FailedMsgBuilder;
+        use quickcheck::Arbitrary;
+        use quickcheck::Gen;
+        use rand::Rng;
+        use rand::distributions::Alphanumeric;
+
+        #[derive(Clone, Debug)]
+        struct AlphaString(String);
+
+        impl Arbitrary for AlphaString {
+            fn arbitrary<G: Gen>(g: &mut G) -> Self {
+                let size = g.size();
+                let size = g.gen_range(1, size);
+                AlphaString(iter::repeat(()).map(|()| g.sample(Alphanumeric)).take(size).collect())
+            }
+        }
+
+        quickcheck! {
+            fn build_message(name: AlphaString, msg: AlphaString) -> bool {
+                let AlphaString(name) = name;
+                let AlphaString(msg) = msg;
+                let line1 = format!("---- {} stdout ----", name);
+                let line2 = format!("thread 'main' paniced at '{}'", msg);
+                let msg = if let Some(msg) = line1.parse::<FailedMsgBuilder>() {
+                    msg.build(&line2)
+                } else {
+                    return false;
+                }
+                msg.name == name && msg.msg == msg
             }
         }
     }
